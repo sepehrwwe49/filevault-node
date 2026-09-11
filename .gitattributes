@@ -1,0 +1,11 @@
+# همه فایل‌های متنی با LF ذخیره و checkout شوند — CRLF اسکریپت‌های bash را روی لینوکس خراب می‌کند
+* text=auto eol=lf
+*.sh      text eol=lf
+*.conf    text eol=lf
+*.php     text eol=lf
+*.yml     text eol=lf
+*.template text eol=lf
+Dockerfile text eol=lf
+*.png binary
+*.jpg binary
+*.gz  binary

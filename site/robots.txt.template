@@ -1,0 +1,11 @@
+User-agent: *
+Allow: /$
+Allow: /about.php
+Allow: /faq.php
+Allow: /terms.php
+Allow: /privacy.php
+Disallow: /d/
+Disallow: /upload.php
+Crawl-delay: 5
+
+Sitemap: https://__PRIMARY__/sitemap.xml

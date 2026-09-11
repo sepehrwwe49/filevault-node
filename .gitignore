@@ -1,0 +1,12 @@
+.env
+data/uploads/*
+data/meta/*
+!data/uploads/.gitkeep
+!data/meta/.gitkeep
+letsencrypt/
+nginx/acme/
+nginx/conf.d/00-site.conf
+nginx/stream.d/00-map.conf
+*.tar.gz
+site/robots.txt
+site/sitemap.xml
