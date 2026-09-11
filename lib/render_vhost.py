@@ -1,19 +1,19 @@
-#!/usr/bin/env python3
 """
-ساخت vhost انجین‌ایکس از روی تمپلیت.
+Render the nginx vhost from the template.
 
-دو حالت مسیر XHTTP پشتیبانی می‌شود:
+Two XHTTP path modes are supported:
 
-1) path اختصاصی  (مثل /xhttp یا /api/v3)
-   -> location همان مسیر به Xray می‌رود، بقیه سایت.
+1) Dedicated path (e.g. /xhttp or /api/v3)
+   -> that location proxies to Xray, everything else serves the website.
 
-2) path ریشه  (path در کانفیگ کلاینت = "/" یا خالی، مثل  path=/?ed=2048)
-   -> نمی‌توان بر اساس مسیر تفکیک کرد، پس بر اساس *شکل درخواست* تفکیک می‌شود:
-        - هر URI که با یک UUID شروع شود  (/<uuid>  یا  /<uuid>/<seq>)  => Xray
-        - هر درخواست POST                                             => Xray
-        - بقیه (GET مرورگر/کرالر روی /)                                => وب‌سایت
-   کلاینت‌های XHTTP همیشه UUID نشست را به مسیر می‌چسبانند و آپلینک را POST
-   می‌کنند، پس کانفیگ‌های قدیمی بدون هیچ تغییری کار می‌کنند و مرورگر سایت می‌بیند.
+2) Root path (client config has path "/" or "/?ed=2048")
+   -> the path cannot be used to split traffic, so requests are split by SHAPE:
+        - any URI starting with a session UUID (/<uuid> or /<uuid>/<seq>) -> Xray
+        - any POST request                                               -> Xray
+        - everything else (browser/crawler GET on /)                     -> website
+   XHTTP clients always append the session UUID to the path and send uplink
+   data as POST, so existing client configs keep working unchanged while
+   browsers and crawlers see a normal website.
 """
 import sys, re
 
@@ -39,12 +39,12 @@ root_mode = (clean == "")
 
 if root_mode:
     xhttp_loc = (
-        "    # ===== VPN traffic (XHTTP روی مسیر ریشه) =====\n"
-        "    # درخواست‌هایی که با UUID نشست شروع می‌شوند => Xray\n"
+        "    # ===== VPN traffic (XHTTP on root path) =====\n"
+        "    # requests beginning with a session UUID -> Xray\n"
         f"    location ~ \"^/{UUID}(/.*)?$\" {{\n{PROXY}\n    }}\n"
     )
     root_loc = (
-        "    # آپلینک XHTTP همیشه POST است؛ مرورگر و کرالر GET می‌زنند.\n"
+        "    # XHTTP uplink is always POST; browsers and crawlers use GET.\n"
         "    location / {\n"
         "        if ($request_method = POST) {\n"
         "            proxy_pass http://xhttp_backend;\n"
@@ -53,7 +53,7 @@ if root_mode:
         "    }"
     )
     xhttp_loc80 = xhttp_loc + (
-        "\n    # آپلینک XHTTP روی پورت‌های http کلودفلر\n"
+        "\n    # XHTTP uplink over Cloudflare http ports\n"
         "    location = / {\n"
         "        if ($request_method = POST) {\n"
         "            proxy_pass http://xhttp_backend;\n"
@@ -63,7 +63,7 @@ if root_mode:
     )
 else:
     xhttp_loc = (
-        "    # ===== VPN traffic (XHTTP) — باید قبل از بقیه باشد =====\n"
+        "    # ===== VPN traffic (XHTTP) - must come before the website =====\n"
         f"    location /{clean} {{\n{PROXY}\n    }}\n"
     )
     xhttp_loc80 = xhttp_loc
