@@ -1,4 +1,4 @@
-upstream php_backend { server 127.0.0.1:9000; keepalive 16; }
+upstream php_backend   { server 127.0.0.1:9000; keepalive 16; }
 upstream xhttp_backend { server 127.0.0.1:__XHTTP_PORT__; keepalive 64; }
 
 # ---------- plain HTTP (Cloudflare :80 ports + ACME fallback) ----------------
@@ -9,21 +9,7 @@ server {
 
     location /.well-known/acme-challenge/ { root /var/www/acme; }
 
-    # XHTTP also works over CF http ports
-    location /__XHTTP_PATH__ {
-        proxy_pass http://xhttp_backend;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "";
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_redirect off;
-        proxy_buffering off;
-        proxy_request_buffering off;
-        proxy_read_timeout 300s;
-        proxy_send_timeout 300s;
-        access_log off;
-    }
+__XHTTP_LOC_80__
 
     location / { return 301 https://$host$request_uri; }
 }
@@ -48,21 +34,7 @@ server {
     add_header X-Content-Type-Options nosniff always;
     add_header Referrer-Policy strict-origin-when-cross-origin always;
 
-    # ===== VPN traffic (XHTTP) — must stay first =====
-    location /__XHTTP_PATH__ {
-        proxy_pass http://xhttp_backend;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "";
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_redirect off;
-        proxy_buffering off;
-        proxy_request_buffering off;
-        proxy_read_timeout 300s;
-        proxy_send_timeout 300s;
-        access_log off;
-    }
+__XHTTP_LOC_443__
 
     # ===== normal website =====
     location = /robots.txt   { try_files /robots.txt =404; }
@@ -88,7 +60,7 @@ server {
         rewrite ^/d/([A-Za-z0-9]{6,32})$ /d.php?id=$1 last;
     }
 
-    location / { try_files $uri $uri/ /index.php?$query_string; }
+__ROOT_LOC__
 
     error_page 404 /404.php;
     location = /404.php {

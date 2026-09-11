@@ -106,12 +106,11 @@ tpl=tpl.replace('__REALITY_MAP__',os.environ.get('REALITY_MAP','').rstrip('\n'))
 open('nginx/stream.d/00-map.conf','w').write(tpl)
 PY
 
-  sed -e "s|__LOCAL_TLS_PORT__|${LOCAL_TLS_PORT}|g" \
-      -e "s|__XHTTP_PORT__|${XRAY_XHTTP_PORT}|g" \
-      -e "s|__XHTTP_PATH__|${XRAY_XHTTP_PATH}|g" \
-      -e "s|__PRIMARY__|${PRIMARY}|g" \
-      -e "s|__MAX_UPLOAD_MB__|${MAX_UPLOAD_MB}|g" \
-      "$FV_DIR/nginx/conf.d/00-site.conf.template" > "$FV_DIR/nginx/conf.d/00-site.conf"
+  python3 "$FV_DIR/lib/render_vhost.py" \
+      "$FV_DIR/nginx/conf.d/00-site.conf.template" \
+      "$FV_DIR/nginx/conf.d/00-site.conf" \
+      "$LOCAL_TLS_PORT" "$XRAY_XHTTP_PORT" "$XRAY_XHTTP_PATH" "$PRIMARY" "$MAX_UPLOAD_MB" \
+      || die "ساخت کانفیگ nginx ناموفق بود"
 
   local f
   for f in robots.txt sitemap.xml; do
@@ -209,7 +208,8 @@ rollback() {
 apply_firewall() {
   load_env || return 1
   command -v ufw >/dev/null || { say "نصب ufw..."; apt-get update -y && apt-get install -y ufw; }
-  warn "پورت‌های باز خواهند بود: $SSH_PORT, 80, 443(tcp+udp), $PANEL_PORT"
+  warn "پورت‌های باز خواهند بود: $SSH_PORT, 80, 443/tcp, $PANEL_PORT"
+  warn "UDP/443 (QUIC/h3) بسته می‌ماند چون nginx فقط TCP را مسیریابی می‌کند — کلاینت خودکار به h2 برمی‌گردد."
   confirm "اعمال شود؟" || return 0
   ufw --force reset >/dev/null
   ufw default deny incoming >/dev/null
@@ -217,7 +217,7 @@ apply_firewall() {
   ufw allow "$SSH_PORT"/tcp comment 'ssh' >/dev/null
   ufw allow 80/tcp   comment 'http'  >/dev/null
   ufw allow 443/tcp  comment 'https' >/dev/null
-  ufw allow 443/udp  comment 'quic'  >/dev/null
+  if [ "${OPEN_QUIC:-0}" = "1" ]; then ufw allow 443/udp comment 'quic' >/dev/null; fi
   ufw allow "$PANEL_PORT"/tcp comment 'panel' >/dev/null
   if [ -n "${EXTRA_OPEN_PORTS:-}" ]; then
     local p; for p in $(echo "$EXTRA_OPEN_PORTS" | tr ',' ' '); do
