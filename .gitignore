@@ -10,3 +10,4 @@ nginx/stream.d/00-map.conf
 *.tar.gz
 site/robots.txt
 site/sitemap.xml
+nginx/conf.d/site_common.inc
