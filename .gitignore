@@ -11,3 +11,4 @@ nginx/stream.d/00-map.conf
 site/robots.txt
 site/sitemap.xml
 nginx/conf.d/site_common.inc
+letsencrypt/current/

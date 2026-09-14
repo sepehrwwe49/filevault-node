@@ -26,7 +26,7 @@ load_env() {
   : "${XRAY_XHTTP_PORT:=12001}" "${XRAY_XHTTP_PATH:=/}" "${LOCAL_TLS_PORT:=8443}"
   : "${CF_API_TOKEN:=}" "${LE_EMAIL:=}" "${MAX_UPLOAD_MB:=50}" "${RETENTION_DAYS:=7}"
   : "${SITE_NAME:=FileVault}" "${PANEL_PORT:=2053}" "${SSH_PORT:=22}"
-  : "${CF_HTTP_PORTS:=80}" "${ENABLE_TLS_LAYER:=1}"
+  : "${CF_HTTP_PORTS:=80}" "${ENABLE_TLS_LAYER:=1}" "${CF_TLS_PORTS:=443}"
   PRIMARY="$(echo "$SITE_DOMAINS" | cut -d, -f1 | xargs)"
   return 0
 }
@@ -102,7 +102,8 @@ render_config() {
   if [ "$ENABLE_TLS_LAYER" = "1" ]; then
     REALITY_MAP="$map" python3 "$FV_DIR/lib/render_stream.py" \
       "$FV_DIR/nginx/stream.d/00-map.conf.template" \
-      "$FV_DIR/nginx/stream.d/00-map.conf" "$LOCAL_TLS_PORT" || die "stream render failed"
+      "$FV_DIR/nginx/stream.d/00-map.conf" "$LOCAL_TLS_PORT" "$CF_TLS_PORTS" \
+      || die "stream render failed"
   else
     rm -f "$FV_DIR/nginx/stream.d/00-map.conf"
     warn "TLS layer disabled (ENABLE_TLS_LAYER=0) - nginx will NOT bind port 443"
@@ -115,24 +116,21 @@ render_config() {
   done
 
   mkdir -p "$FV_DIR/data/uploads" "$FV_DIR/data/meta" "$FV_DIR/nginx/acme" \
-           "$FV_DIR/letsencrypt/selfsigned/$PRIMARY"
+           "$FV_DIR/letsencrypt/current"
   chown -R 33:33 "$FV_DIR/data" 2>/dev/null || true
   chmod -R 775 "$FV_DIR/data" 2>/dev/null || true
 
-  # bootstrap cert lives OUTSIDE live/ so certbot never mistakes it for a real one
-  if [ ! -f "$FV_DIR/letsencrypt/selfsigned/$PRIMARY/fullchain.pem" ]; then
+  # nginx always reads /etc/letsencrypt/current; certbot republishes into it on
+  # every issue and renew, so the vhost never needs re-rendering for a new cert.
+  mkdir -p "$FV_DIR/letsencrypt/current"
+  if [ ! -f "$FV_DIR/letsencrypt/current/fullchain.pem" ]; then
     openssl req -x509 -nodes -newkey rsa:2048 -days 3650 \
-      -keyout "$FV_DIR/letsencrypt/selfsigned/$PRIMARY/privkey.pem" \
-      -out    "$FV_DIR/letsencrypt/selfsigned/$PRIMARY/fullchain.pem" \
+      -keyout "$FV_DIR/letsencrypt/current/privkey.pem" \
+      -out    "$FV_DIR/letsencrypt/current/fullchain.pem" \
       -subj "/CN=$PRIMARY" >/dev/null 2>&1
-    warn "Bootstrap self-signed certificate created (certbot will issue the real one)"
+    warn "Bootstrap certificate in place - certbot will replace it automatically"
   fi
-  if [ -f "$FV_DIR/letsencrypt/live/$PRIMARY/fullchain.pem" ]; then
-    CERT_DIR="/etc/letsencrypt/live/$PRIMARY"
-  else
-    CERT_DIR="/etc/letsencrypt/selfsigned/$PRIMARY"
-    warn "No Let's Encrypt certificate yet - nginx will use the bootstrap cert"
-  fi
+  CERT_DIR="/etc/letsencrypt/current"
   python3 "$FV_DIR/lib/render_vhost.py" \
       "$FV_DIR/nginx/conf.d/00-site.conf.template" \
       "$FV_DIR/nginx/conf.d/00-site.conf" \
@@ -142,9 +140,47 @@ render_config() {
   ok "Config rendered (primary domain: $PRIMARY)"
 }
 
-# ----------------------------------------------------------- checks --------
+
+# ----------------------------------------------------------- port helpers --
 port_busy() { ss -ltn "( sport = :$1 )" 2>/dev/null | grep -q LISTEN; }
 port_owner(){ ss -ltnp "( sport = :$1 )" 2>/dev/null | awk 'NR>1{print $NF}' | head -1; }
+
+# first free port at or after $1
+free_port() {
+  local p="$1"
+  while port_busy "$p"; do p=$((p+1)); done
+  echo "$p"
+}
+
+# keep only the ports of a list that are free (or already ours)
+filter_free_ports() {
+  local out="" p
+  for p in $(echo "$1" | tr ',' ' '); do
+    if ! port_busy "$p" || port_owner "$p" | grep -qi nginx; then
+      out="${out:+$out,}$p"
+    fi
+  done
+  echo "$out"
+}
+
+port_scan() {
+  hr; echo " PORT MAP"; hr
+  printf '  %-8s %-10s %s\n' PORT STATE OWNER
+  local p
+  for p in 80 443 2052 2053 2082 2083 2086 2087 2095 2096 8080 8443 8880 \
+           "${LOCAL_TLS_PORT:-8443}" "${XRAY_XHTTP_PORT:-12001}" "${XRAY_REALITY_PORT:-12000}"; do
+    if port_busy "$p"; then
+      printf '  %-8s %-10s %s\n' "$p" "BUSY" "$(port_owner "$p")"
+    else
+      printf '  %-8s %-10s\n' "$p" "free"
+    fi
+  done
+  hr
+  echo "  Cloudflare HTTP ports: 80 8080 8880 2052 2082 2086 2095"
+  echo "  Cloudflare TLS  ports: 443 2053 2083 2087 2096 8443"
+}
+
+# ----------------------------------------------------------- checks --------
 
 preflight() {
   load_env || { err ".env not found"; return 1; }
@@ -166,11 +202,43 @@ preflight() {
 }
 
 # ------------------------------------------------------------- lifecycle ---
-build_up()   { render_config; say "Starting containers..."; dc up -d --build && ok "Containers are up"; }
+build_up()   {
+  render_config
+  say "Starting containers..."
+  dc up -d --build >/dev/null 2>&1 || true
+  # a container stuck in a restart loop is not touched by plain "up"
+  if dc ps nginx 2>/dev/null | grep -qi restarting; then
+    warn "nginx was restarting - recreating it"
+    dc up -d --force-recreate nginx
+  else
+    dc up -d --build
+  fi
+  sleep 2
+  if dc ps nginx 2>/dev/null | grep -qi restarting; then
+    err "nginx is still failing:"
+    dc logs --tail 6 nginx | grep -i emerg || dc logs --tail 8 nginx
+    return 1
+  fi
+  ok "Containers are up"
+}
 restart_all(){ render_config; dc up -d --build; dc restart; ok "Restarted"; }
 stop_all()   { dc down; ok "Stopped"; }
 nginx_test() { dc exec -T nginx nginx -t; }
-nginx_reload(){ render_config; dc exec -T nginx nginx -t && dc exec -T nginx nginx -s reload && ok "nginx reloaded"; }
+nginx_reload(){
+  render_config
+  if dc exec -T nginx nginx -t >/dev/null 2>&1; then
+    dc exec -T nginx nginx -s reload && ok "nginx reloaded"
+  else
+    warn "reload not possible - recreating nginx"
+    dc up -d --force-recreate nginx
+    sleep 2
+    if dc ps nginx 2>/dev/null | grep -qi restarting; then
+      err "nginx failed to start:"; dc logs --tail 6 nginx | grep -i emerg
+      return 1
+    fi
+    ok "nginx recreated"
+  fi
+}
 
 # Start web stack WITHOUT binding port 443 (safe pre-cutover stage)
 start_backend_only() {
@@ -219,7 +287,7 @@ rollback() {
 apply_firewall() {
   load_env || return 1
   command -v ufw >/dev/null || { say "Installing ufw..."; apt-get update -y && apt-get install -y ufw; }
-  warn "Ports that will stay open: $SSH_PORT, ${CF_HTTP_PORTS}, 443/tcp, $PANEL_PORT, ${EXTRA_OPEN_PORTS:-none}"
+  warn "Ports that will stay open: $SSH_PORT, http=${CF_HTTP_PORTS}, tls=${CF_TLS_PORTS}, panel=$PANEL_PORT, extra=${EXTRA_OPEN_PORTS:-none}"
   warn "UDP/443 (QUIC/h3) stays closed - nginx routes TCP only, clients fall back to h2."
   confirm "Apply firewall rules?" || return 0
   ufw --force reset >/dev/null
@@ -230,7 +298,10 @@ apply_firewall() {
   for hp in $(echo "${CF_HTTP_PORTS:-80}" | tr ',' ' '); do
     ufw allow "${hp}"/tcp comment 'http' >/dev/null
   done
-  ufw allow 443/tcp  comment 'https' >/dev/null
+  local tp
+  for tp in $(echo "${CF_TLS_PORTS:-443}" | tr ',' ' '); do
+    ufw allow "${tp}"/tcp comment 'https' >/dev/null
+  done
   if [ "${OPEN_QUIC:-0}" = "1" ]; then ufw allow 443/udp comment 'quic' >/dev/null; fi
   ufw allow "$PANEL_PORT"/tcp comment 'panel' >/dev/null
   if [ -n "${EXTRA_OPEN_PORTS:-}" ]; then
@@ -258,12 +329,13 @@ status() {
   printf '  Xray Reality     : 127.0.0.1:%s\n' "$XRAY_REALITY_PORT"
   printf '  Xray XHTTP       : 127.0.0.1:%s   path=%s\n' "$XRAY_XHTTP_PORT" "$XRAY_XHTTP_PATH"
   printf '  HTTP listen ports: %s\n' "$CF_HTTP_PORTS"
+  printf '  TLS listen ports : %s\n' "$CF_TLS_PORTS"
   printf '  Panel port       : %s\n' "$PANEL_PORT"
   printf '  Upload limit     : %s MB   retention: %s days\n' "$MAX_UPLOAD_MB" "$RETENTION_DAYS"
   hr
   dc ps 2>/dev/null
   hr
-  local p; for p in $(echo "$CF_HTTP_PORTS" | tr ',' ' ') 443 "$LOCAL_TLS_PORT" "$XRAY_XHTTP_PORT" "$XRAY_REALITY_PORT" "$PANEL_PORT"; do
+  local p; for p in $(echo "$CF_HTTP_PORTS" | tr ',' ' ') $(echo "$CF_TLS_PORTS" | tr ',' ' ') "$LOCAL_TLS_PORT" "$XRAY_XHTTP_PORT" "$XRAY_REALITY_PORT" "$PANEL_PORT"; do
     if port_busy "$p"; then printf '  port %-6s %sLISTEN%s  %s\n' "$p" "$C_G" "$C_0" "$(port_owner "$p")"
     else printf '  port %-6s %sclosed%s\n' "$p" "$C_R" "$C_0"; fi
   done
@@ -289,4 +361,139 @@ selftest() {
   rm -f "$tmp"
   hr
   echo " Also test from outside:  curl -I https://$PRIMARY/"
+}
+
+# =============================================================================
+#  doctor - find and fix the usual problems without hand-written commands
+# =============================================================================
+doctor() {
+  load_env || { err ".env not found - run the setup wizard first"; return 1; }
+  local fixes=0
+  hr; echo " DOCTOR"; hr
+
+  # 1. internal ports must not clash with anything else on the host
+  local p owner
+  for var in LOCAL_TLS_PORT XRAY_XHTTP_PORT; do
+    eval "p=\$$var"
+    owner="$(port_owner "$p")"
+    if port_busy "$p" && ! echo "$owner" | grep -qiE 'nginx|xray'; then
+      warn "$var=$p is taken by $owner"
+    fi
+  done
+  if port_busy "$LOCAL_TLS_PORT" && ! port_owner "$LOCAL_TLS_PORT" | grep -qi nginx; then
+    local np; np="$(free_port 18443)"
+    warn "LOCAL_TLS_PORT $LOCAL_TLS_PORT is used by $(port_owner "$LOCAL_TLS_PORT")"
+    if confirm "Move the internal site port to $np?"; then
+      env_set LOCAL_TLS_PORT "$np"; LOCAL_TLS_PORT="$np"; fixes=$((fixes+1)); ok "set to $np"
+    fi
+  fi
+
+  # 2. every listen port must be free or already ours
+  local clean_http clean_tls
+  clean_http="$(filter_free_ports "$CF_HTTP_PORTS")"
+  clean_tls="$(filter_free_ports "$CF_TLS_PORTS")"
+  if [ "$clean_http" != "$CF_HTTP_PORTS" ]; then
+    warn "HTTP ports in use by something else: $CF_HTTP_PORTS -> $clean_http"
+    if confirm "Drop the busy ones?"; then env_set CF_HTTP_PORTS "$clean_http"; fixes=$((fixes+1)); fi
+  fi
+  if [ "$clean_tls" != "$CF_TLS_PORTS" ]; then
+    warn "TLS ports in use by something else: $CF_TLS_PORTS -> $clean_tls"
+    if confirm "Drop the busy ones?"; then env_set CF_TLS_PORTS "$clean_tls"; fixes=$((fixes+1)); fi
+  fi
+
+  # 3. the Xray upstream must actually be listening
+  if port_busy "$XRAY_XHTTP_PORT"; then ok "Xray upstream $XRAY_XHTTP_PORT is listening"
+  else err "Nothing is listening on $XRAY_XHTTP_PORT - create that inbound in the panel"; fi
+
+  # 4. certificate
+  local cur="$FV_DIR/letsencrypt/current/fullchain.pem"
+  if [ -f "$cur" ]; then
+    local issuer; issuer="$(openssl x509 -in "$cur" -noout -issuer 2>/dev/null)"
+    case "$issuer" in
+      *"Let's Encrypt"*) ok "certificate issued by Let's Encrypt" ;;
+      *) warn "still using the bootstrap certificate"
+         if confirm "Ask certbot to issue the real one now?"; then
+           dc rm -sf certbot >/dev/null 2>&1
+           dc up -d --build certbot
+           say "issuing... (about a minute)"; sleep 55
+           dc logs --tail 6 certbot
+           fixes=$((fixes+1))
+         fi ;;
+    esac
+  fi
+
+  # 5. containers
+  if dc ps nginx 2>/dev/null | grep -qi restarting; then
+    err "nginx is in a restart loop:"
+    dc logs --tail 6 nginx | grep -i emerg
+    if confirm "Re-render the config and restart it?"; then build_up; fixes=$((fixes+1)); fi
+  elif dc ps nginx 2>/dev/null | grep -qi ' Up '; then
+    ok "nginx is running"
+  else
+    warn "nginx is not running"
+    confirm "Start it?" && { build_up; fixes=$((fixes+1)); }
+  fi
+
+  hr
+  if [ "$fixes" -gt 0 ]; then
+    say "applied $fixes fix(es) - restarting"
+    build_up
+  fi
+  ok "doctor finished"
+}
+
+# =============================================================================
+#  take_port - hand one more port to nginx, end to end
+# =============================================================================
+take_port() {
+  load_env || return 1
+  local port kind cur
+  hr; echo " TAKE OVER A PORT"; hr
+  port_scan
+  echo
+  ask port "Port to hand to nginx" ""
+  [ -n "$port" ] || return 0
+
+  case "$port" in
+    443|2053|2083|2087|2096|8443) kind=tls ;;
+    *) kind=http ;;
+  esac
+  ask kind "Is this a plain-HTTP or a TLS port? (http/tls)" "$kind"
+
+  if port_busy "$port"; then
+    local o; o="$(port_owner "$port")"
+    if echo "$o" | grep -qi nginx; then
+      ok "nginx already owns $port"; return 0
+    fi
+    err "port $port is used by: $o"
+    echo
+    echo "  In the panel, change THAT inbound's port to a free internal one"
+    echo "  (suggestion: $(free_port 12010)) and keep everything else the same."
+    echo "  Then come back and run this again."
+    confirm "Have you already freed it and want to continue anyway?" || return 0
+  fi
+
+  if [ "$kind" = "tls" ]; then
+    cur="$CF_TLS_PORTS"
+    echo "$cur" | tr ',' '\n' | grep -qx "$port" || env_set CF_TLS_PORTS "${cur:+$cur,}$port"
+    env_set ENABLE_TLS_LAYER 1
+  else
+    cur="$CF_HTTP_PORTS"
+    echo "$cur" | tr ',' '\n' | grep -qx "$port" || env_set CF_HTTP_PORTS "${cur:+$cur,}$port"
+  fi
+
+  load_env
+  nginx_reload || return 1
+  sleep 1
+
+  hr; echo " VERIFY"; hr
+  if [ "$kind" = "tls" ]; then
+    printf '  website : '; curl -sk -o /dev/null -w '%{http_code}\n' -H "Host: $PRIMARY" "https://127.0.0.1:$port/"
+  else
+    printf '  website : '; curl -s -o /dev/null -w '%{http_code}\n' -H "Host: $PRIMARY" "http://127.0.0.1:$port/"
+    printf '  vpn path: '; curl -s -o /dev/null -w '%{http_code}\n' -X POST -H "Host: $PRIMARY" "http://127.0.0.1:$port/"
+  fi
+  echo
+  echo "  website should be 200; vpn path should NOT be 200."
+  echo "  Client config: keep everything, just set the port to $port."
 }

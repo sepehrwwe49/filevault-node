@@ -25,7 +25,7 @@ import sys, os
 tpl_path, out_path, local_tls, xport, xpath, primary, maxmb = sys.argv[1:8]
 http_ports = sys.argv[8] if len(sys.argv) > 8 else "80"
 enable_tls = (sys.argv[9] if len(sys.argv) > 9 else "1") == "1"
-cert_dir   = sys.argv[10] if len(sys.argv) > 10 else "/etc/letsencrypt/live/" + primary
+cert_dir   = sys.argv[10] if len(sys.argv) > 10 else "/etc/letsencrypt/current"
 
 listen_lines = []
 for i, p in enumerate([x.strip() for x in http_ports.split(",") if x.strip()]):

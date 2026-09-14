@@ -41,19 +41,37 @@ B
 
 wizard() {
   hr; echo " SETUP WIZARD"; hr
-  echo "  Press Enter to keep the value shown in [brackets]."
-  echo
   load_env 2>/dev/null
-  local sd rd rp xp xpath cft mail mb rdays sname panel sshp cfhp extra
+  port_scan
+  echo
+  echo "  Press Enter to keep the value shown in [brackets]."
+  echo "  Defaults below are already picked from the FREE ports on this server."
+  echo
+
+  # pick internal ports that are actually free on this host
+  local d_tls d_xhttp d_reality d_http d_tlsp
+  d_tls="${LOCAL_TLS_PORT:-}";     [ -n "$d_tls" ]     && port_busy "$d_tls"     && d_tls=""
+  [ -n "$d_tls" ]     || d_tls="$(free_port 18443)"
+  d_xhttp="${XRAY_XHTTP_PORT:-}"
+  [ -n "$d_xhttp" ]   || d_xhttp="$(free_port 12011)"
+  d_reality="${XRAY_REALITY_PORT:-}"
+  [ -n "$d_reality" ] || d_reality="$(free_port 12020)"
+  d_http="$(filter_free_ports "${CF_HTTP_PORTS:-80,8080,8880,2052,2082,2086,2095}")"
+  d_tlsp="$(filter_free_ports "${CF_TLS_PORTS:-443}")"
+  [ -n "$d_http" ] || d_http=80
+  [ -n "$d_tlsp" ] || d_tlsp=443
+  local sd rd rp xp xpath cft mail mb rdays sname panel sshp cfhp cftp extra
 
   ask sd    "Site / XHTTP subdomains (comma separated)" "${SITE_DOMAINS:-}"
   ask rd    "Reality domains (comma separated, empty = none)" "${REALITY_DOMAINS:-}"
-  ask rp    "Local Reality port (as set in the panel)" "${XRAY_REALITY_PORT:-12000}"
-  ask xp    "Local XHTTP port (as set in the panel)" "${XRAY_XHTTP_PORT:-12001}"
+  ask rp    "Local Reality port (as set in the panel)" "$d_reality"
+  ask xp    "Local XHTTP port (as set in the panel)" "$d_xhttp"
   echo "    -> If your client config has path=/?ed=2048 or path=/, answer with a single  /"
   ask xpath "XHTTP path from the client config" "${XRAY_XHTTP_PATH:-/}"
   echo "    -> Cloudflare plain-HTTP ports your configs use (security=none). 80 is always included."
-  ask cfhp  "HTTP listen ports (comma separated)" "${CF_HTTP_PORTS:-80,2052,2082,2086,2095,8080,8880}"
+  ask cfhp  "HTTP listen ports (comma separated)" "$d_http"
+  echo "    -> Cloudflare TLS ports to take over (443,2053,2083,2087,2096,8443). Only free ones."
+  ask cftp  "TLS listen ports (comma separated)" "$d_tlsp"
   ask panel "Pasarguard panel port" "${PANEL_PORT:-2053}"
   ask sshp  "SSH port" "${SSH_PORT:-22}"
   ask extra "Extra ports to keep open (Reality direct port, node API...)" "${EXTRA_OPEN_PORTS:-}"
@@ -69,6 +87,7 @@ wizard() {
   env_set XRAY_XHTTP_PORT   "$xp"
   env_set XRAY_XHTTP_PATH   "$xpath"
   env_set CF_HTTP_PORTS     "$cfhp"
+  env_set CF_TLS_PORTS      "$cftp"
   env_set EXTRA_OPEN_PORTS  "$extra"
   env_set PANEL_PORT        "$panel"
   env_set SSH_PORT          "$sshp"
@@ -77,17 +96,27 @@ wizard() {
   env_set MAX_UPLOAD_MB     "$mb"
   env_set RETENTION_DAYS    "$rdays"
   env_set SITE_NAME         "$sname"
-  env_set LOCAL_TLS_PORT    "${LOCAL_TLS_PORT:-8443}"
+  env_set LOCAL_TLS_PORT    "$d_tls"
   chmod 600 "$ENV_FILE"
   ok "Settings saved to .env"
 
   need_docker || install_docker
   render_config
   echo
-  if confirm "Start the backend now (site + SSL) WITHOUT touching port 443?"; then
-    start_backend_only
+  if confirm "Bring everything up now on the free ports listed above?"; then
+    build_up || return 1
     echo
-    say "Next: menu 6 -> 1 to check the certificate, then menu 3 to cut over."
+    say "waiting for the certificate (about a minute)..."
+    local i=0
+    while [ $i -lt 20 ]; do
+      openssl x509 -in "$FV_DIR/letsencrypt/current/fullchain.pem" -noout -issuer 2>/dev/null \
+        | grep -qi "let's encrypt" && break
+      sleep 6; i=$((i+1)); printf '.'
+    done
+    echo
+    selftest
+    echo
+    say "Ports still held by Xray can be handed over one at a time with menu option 3."
   fi
 }
 
@@ -127,7 +156,9 @@ xray_menu() {
   ask rp    "Reality port" "$XRAY_REALITY_PORT"
   ask xp    "XHTTP port"   "$XRAY_XHTTP_PORT"
   ask xpath "XHTTP path (use / for root-path configs)" "$XRAY_XHTTP_PATH"
-  local cfhp2; ask cfhp2 "HTTP listen ports" "$CF_HTTP_PORTS"; env_set CF_HTTP_PORTS "$cfhp2"
+  local cfhp2 cftp2
+  ask cfhp2 "HTTP listen ports" "$CF_HTTP_PORTS"; env_set CF_HTTP_PORTS "$cfhp2"
+  ask cftp2 "TLS listen ports"  "$CF_TLS_PORTS";  env_set CF_TLS_PORTS  "$cftp2"
   env_set XRAY_REALITY_PORT "$rp"; env_set XRAY_XHTTP_PORT "$xp"; env_set XRAY_XHTTP_PATH "$xpath"
   render_config; nginx_reload
   warn "These must match the inbounds in your panel."
@@ -203,8 +234,8 @@ main_menu() {
     banner
     cat <<'M'
    1) Setup wizard (domains, ports, path, CF token, limits)
-   2) Preflight check
-   3) Zero-downtime cutover  ->  put nginx on 443
+   2) Doctor  (find and fix problems)
+   3) Take over a port  (hand one more port to nginx)
    4) Node status
    5) Domains (add / remove)
    6) SSL
@@ -217,7 +248,7 @@ main_menu() {
   13) Site self-test
   14) Run cleanup now (delete expired files)
   15) Backup for moving to a new server
-  16) Rollback - stop nginx and free port 443
+  16) Rollback - stop nginx and free its ports
   17) Update from GitHub
   18) Install  sudo fv  shortcut
   19) Uninstall everything
@@ -228,8 +259,8 @@ M
     echo
     case "$c" in
       1) wizard; pause ;;
-      2) preflight; pause ;;
-      3) cutover; pause ;;
+      2) doctor; pause ;;
+      3) take_port; pause ;;
       4) status; pause ;;
       5) domains_menu; pause ;;
       6) ssl_menu; pause ;;
@@ -261,9 +292,12 @@ case "${1:-}" in
   cutover)   cutover ;;
   rollback)  rollback ;;
   preflight) preflight ;;
+  doctor)    doctor ;;
+  ports)     load_env; port_scan ;;
+  take)      take_port ;;
   reload)    nginx_reload ;;
   test)      selftest ;;
   firewall)  apply_firewall ;;
   backup)    backup_now ;;
-  *) echo "usage: fv [menu|install|up|down|status|preflight|cutover|rollback|reload|test|firewall|backup]" ;;
+  *) echo "usage: fv [menu|install|up|down|status|doctor|ports|take|preflight|cutover|rollback|reload|test|firewall|backup]" ;;
 esac

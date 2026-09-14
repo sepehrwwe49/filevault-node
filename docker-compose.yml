@@ -14,6 +14,16 @@ services:
       - ./nginx/acme:/var/www/acme
     depends_on:
       - php
+    command: >
+      sh -c 'last="";
+             ( while true; do
+                 cur=$$(cat /etc/letsencrypt/current/.reload 2>/dev/null || echo "");
+                 if [ -n "$$cur" ] && [ "$$cur" != "$$last" ]; then
+                   last="$$cur";
+                   nginx -t >/dev/null 2>&1 && nginx -s reload 2>/dev/null && echo "[nginx] reloaded for new certificate";
+                 fi; sleep 60;
+               done ) &
+             exec nginx -g "daemon off;"' 
 
   php:
     build: ./site
