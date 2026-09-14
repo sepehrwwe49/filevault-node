@@ -3,8 +3,7 @@ upstream xhttp_backend { server 127.0.0.1:__XHTTP_PORT__; keepalive 64; }
 
 # ---------- plain HTTP (Cloudflare :80 ports + ACME fallback) ----------------
 server {
-    listen 80 default_server;
-    listen [::]:80 default_server;
+__HTTP_LISTEN__
     server_name _;
 
     location /.well-known/acme-challenge/ { root /var/www/acme; }

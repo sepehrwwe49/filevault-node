@@ -26,6 +26,7 @@ load_env() {
   : "${XRAY_XHTTP_PORT:=12001}" "${XRAY_XHTTP_PATH:=/}" "${LOCAL_TLS_PORT:=8443}"
   : "${CF_API_TOKEN:=}" "${LE_EMAIL:=}" "${MAX_UPLOAD_MB:=50}" "${RETENTION_DAYS:=7}"
   : "${SITE_NAME:=FileVault}" "${PANEL_PORT:=2053}" "${SSH_PORT:=22}"
+  : "${CF_HTTP_PORTS:=80}"
   PRIMARY="$(echo "$SITE_DOMAINS" | cut -d, -f1 | xargs)"
   return 0
 }
@@ -111,6 +112,7 @@ PY
       "$FV_DIR/nginx/conf.d/00-site.conf.template" \
       "$FV_DIR/nginx/conf.d/00-site.conf" \
       "$LOCAL_TLS_PORT" "$XRAY_XHTTP_PORT" "$XRAY_XHTTP_PATH" "$PRIMARY" "$MAX_UPLOAD_MB" \
+      "$CF_HTTP_PORTS" \
       || die "Failed to render nginx config"
 
   local f
@@ -210,14 +212,17 @@ rollback() {
 apply_firewall() {
   load_env || return 1
   command -v ufw >/dev/null || { say "Installing ufw..."; apt-get update -y && apt-get install -y ufw; }
-  warn "Ports that will stay open: $SSH_PORT, 80, 443/tcp, $PANEL_PORT"
+  warn "Ports that will stay open: $SSH_PORT, ${CF_HTTP_PORTS}, 443/tcp, $PANEL_PORT, ${EXTRA_OPEN_PORTS:-none}"
   warn "UDP/443 (QUIC/h3) stays closed - nginx routes TCP only, clients fall back to h2."
   confirm "Apply firewall rules?" || return 0
   ufw --force reset >/dev/null
   ufw default deny incoming >/dev/null
   ufw default allow outgoing >/dev/null
   ufw allow "$SSH_PORT"/tcp comment 'ssh' >/dev/null
-  ufw allow 80/tcp   comment 'http'  >/dev/null
+  local hp
+  for hp in $(echo "${CF_HTTP_PORTS:-80}" | tr ',' ' '); do
+    ufw allow "${hp}"/tcp comment 'http' >/dev/null
+  done
   ufw allow 443/tcp  comment 'https' >/dev/null
   if [ "${OPEN_QUIC:-0}" = "1" ]; then ufw allow 443/udp comment 'quic' >/dev/null; fi
   ufw allow "$PANEL_PORT"/tcp comment 'panel' >/dev/null
@@ -245,12 +250,13 @@ status() {
   printf '  Reality domains  : %s\n' "${REALITY_DOMAINS:-none}"
   printf '  Xray Reality     : 127.0.0.1:%s\n' "$XRAY_REALITY_PORT"
   printf '  Xray XHTTP       : 127.0.0.1:%s   path=%s\n' "$XRAY_XHTTP_PORT" "$XRAY_XHTTP_PATH"
+  printf '  HTTP listen ports: %s\n' "$CF_HTTP_PORTS"
   printf '  Panel port       : %s\n' "$PANEL_PORT"
   printf '  Upload limit     : %s MB   retention: %s days\n' "$MAX_UPLOAD_MB" "$RETENTION_DAYS"
   hr
   dc ps 2>/dev/null
   hr
-  local p; for p in 80 443 "$LOCAL_TLS_PORT" "$XRAY_XHTTP_PORT" "$XRAY_REALITY_PORT" "$PANEL_PORT"; do
+  local p; for p in $(echo "$CF_HTTP_PORTS" | tr ',' ' ') 443 "$LOCAL_TLS_PORT" "$XRAY_XHTTP_PORT" "$XRAY_REALITY_PORT" "$PANEL_PORT"; do
     if port_busy "$p"; then printf '  port %-6s %sLISTEN%s  %s\n' "$p" "$C_G" "$C_0" "$(port_owner "$p")"
     else printf '  port %-6s %sclosed%s\n' "$p" "$C_R" "$C_0"; fi
   done

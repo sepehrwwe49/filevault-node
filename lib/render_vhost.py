@@ -18,6 +18,14 @@ Two XHTTP path modes are supported:
 import sys, re
 
 tpl_path, out_path, local_tls, xport, xpath, primary, maxmb = sys.argv[1:8]
+http_ports = sys.argv[8] if len(sys.argv) > 8 else "80"
+
+listen_lines = []
+for i, p in enumerate([x.strip() for x in http_ports.split(",") if x.strip()]):
+    d = " default_server" if i == 0 else ""
+    listen_lines.append(f"    listen {p}{d};")
+    listen_lines.append(f"    listen [::]:{p}{d};")
+HTTP_LISTEN = "\n".join(listen_lines)
 
 PROXY = """        proxy_pass http://xhttp_backend;
         proxy_http_version 1.1;
@@ -76,9 +84,10 @@ s = (s.replace("__XHTTP_LOC_443__", xhttp_loc.rstrip())
        .replace("__LOCAL_TLS_PORT__", local_tls)
        .replace("__XHTTP_PORT__", xport)
        .replace("__PRIMARY__", primary)
-       .replace("__MAX_UPLOAD_MB__", maxmb))
+       .replace("__MAX_UPLOAD_MB__", maxmb)
+       .replace("__HTTP_LISTEN__", HTTP_LISTEN))
 s += """
 # error page
 """
 open(out_path, "w", encoding="utf-8").write(s)
-print("[render] mode=" + ("root-path" if root_mode else "/" + clean))
+print("[render] mode=" + ("root-path" if root_mode else "/" + clean) + "  http ports=" + http_ports)

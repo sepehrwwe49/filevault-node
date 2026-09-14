@@ -3,7 +3,18 @@
 #  FileVault Node - management menu
 #  run:  sudo bash menu.sh     or after install:  sudo fv
 # ---------------------------------------------------------------------------
-FV_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# resolve symlinks (/usr/local/bin/fv -> /opt/filevault/menu.sh)
+FV_SELF="${BASH_SOURCE[0]}"
+while [ -L "$FV_SELF" ]; do
+  FV_LINK="$(readlink "$FV_SELF")"
+  case "$FV_LINK" in
+    /*) FV_SELF="$FV_LINK" ;;
+    *)  FV_SELF="$(cd "$(dirname "$FV_SELF")" && pwd)/$FV_LINK" ;;
+  esac
+done
+FV_DIR="$(cd "$(dirname "$FV_SELF")" && pwd)"
+export FV_DIR
+[ -f "$FV_DIR/lib/core.sh" ] || { echo "[X] lib/core.sh not found in $FV_DIR"; exit 1; }
 . "$FV_DIR/lib/core.sh"
 
 [ "$(id -u)" -eq 0 ] || die "Run as root:  sudo bash menu.sh"
@@ -33,7 +44,7 @@ wizard() {
   echo "  Press Enter to keep the value shown in [brackets]."
   echo
   load_env 2>/dev/null
-  local sd rd rp xp xpath cft mail mb rdays sname panel sshp
+  local sd rd rp xp xpath cft mail mb rdays sname panel sshp cfhp extra
 
   ask sd    "Site / XHTTP subdomains (comma separated)" "${SITE_DOMAINS:-}"
   ask rd    "Reality domains (comma separated, empty = none)" "${REALITY_DOMAINS:-}"
@@ -41,8 +52,11 @@ wizard() {
   ask xp    "Local XHTTP port (as set in the panel)" "${XRAY_XHTTP_PORT:-12001}"
   echo "    -> If your client config has path=/?ed=2048 or path=/, answer with a single  /"
   ask xpath "XHTTP path from the client config" "${XRAY_XHTTP_PATH:-/}"
+  echo "    -> Cloudflare plain-HTTP ports your configs use (security=none). 80 is always included."
+  ask cfhp  "HTTP listen ports (comma separated)" "${CF_HTTP_PORTS:-80,2052,2082,2086,2095,8080,8880}"
   ask panel "Pasarguard panel port" "${PANEL_PORT:-2053}"
   ask sshp  "SSH port" "${SSH_PORT:-22}"
+  ask extra "Extra ports to keep open (Reality direct port, node API...)" "${EXTRA_OPEN_PORTS:-}"
   ask cft   "Cloudflare API token (Zone:Read + DNS:Edit)" "${CF_API_TOKEN:-}"
   ask mail  "Let's Encrypt e-mail" "${LE_EMAIL:-}"
   ask mb    "Max upload size (MB)" "${MAX_UPLOAD_MB:-50}"
@@ -54,6 +68,8 @@ wizard() {
   env_set XRAY_REALITY_PORT "$rp"
   env_set XRAY_XHTTP_PORT   "$xp"
   env_set XRAY_XHTTP_PATH   "$xpath"
+  env_set CF_HTTP_PORTS     "$cfhp"
+  env_set EXTRA_OPEN_PORTS  "$extra"
   env_set PANEL_PORT        "$panel"
   env_set SSH_PORT          "$sshp"
   env_set CF_API_TOKEN      "$cft"
@@ -111,6 +127,7 @@ xray_menu() {
   ask rp    "Reality port" "$XRAY_REALITY_PORT"
   ask xp    "XHTTP port"   "$XRAY_XHTTP_PORT"
   ask xpath "XHTTP path (use / for root-path configs)" "$XRAY_XHTTP_PATH"
+  local cfhp2; ask cfhp2 "HTTP listen ports" "$CF_HTTP_PORTS"; env_set CF_HTTP_PORTS "$cfhp2"
   env_set XRAY_REALITY_PORT "$rp"; env_set XRAY_XHTTP_PORT "$xp"; env_set XRAY_XHTTP_PATH "$xpath"
   render_config; nginx_reload
   warn "These must match the inbounds in your panel."
