@@ -26,7 +26,7 @@ load_env() {
   : "${XRAY_XHTTP_PORT:=12001}" "${XRAY_XHTTP_PATH:=/}" "${LOCAL_TLS_PORT:=8443}"
   : "${CF_API_TOKEN:=}" "${LE_EMAIL:=}" "${MAX_UPLOAD_MB:=50}" "${RETENTION_DAYS:=7}"
   : "${SITE_NAME:=FileVault}" "${PANEL_PORT:=2053}" "${SSH_PORT:=22}"
-  : "${CF_HTTP_PORTS:=80}"
+  : "${CF_HTTP_PORTS:=80}" "${ENABLE_TLS_LAYER:=1}"
   PRIMARY="$(echo "$SITE_DOMAINS" | cut -d, -f1 | xargs)"
   return 0
 }
@@ -99,20 +99,20 @@ render_config() {
       map+="    ${d}   127.0.0.1:${XRAY_REALITY_PORT};"$'\n'
     done
   fi
-  ( cd "$FV_DIR" && REALITY_MAP="$map" LOCAL_TLS_PORT="$LOCAL_TLS_PORT" python3 - <<'PY'
-import os
-tpl=open('nginx/stream.d/00-map.conf.template').read()
-tpl=tpl.replace('__LOCAL_TLS_PORT__',os.environ['LOCAL_TLS_PORT'])
-tpl=tpl.replace('__REALITY_MAP__',os.environ.get('REALITY_MAP','').rstrip('\n'))
-open('nginx/stream.d/00-map.conf','w').write(tpl)
-PY
-  )
+  if [ "$ENABLE_TLS_LAYER" = "1" ]; then
+    REALITY_MAP="$map" python3 "$FV_DIR/lib/render_stream.py" \
+      "$FV_DIR/nginx/stream.d/00-map.conf.template" \
+      "$FV_DIR/nginx/stream.d/00-map.conf" "$LOCAL_TLS_PORT" || die "stream render failed"
+  else
+    rm -f "$FV_DIR/nginx/stream.d/00-map.conf"
+    warn "TLS layer disabled (ENABLE_TLS_LAYER=0) - nginx will NOT bind port 443"
+  fi
 
   python3 "$FV_DIR/lib/render_vhost.py" \
       "$FV_DIR/nginx/conf.d/00-site.conf.template" \
       "$FV_DIR/nginx/conf.d/00-site.conf" \
       "$LOCAL_TLS_PORT" "$XRAY_XHTTP_PORT" "$XRAY_XHTTP_PATH" "$PRIMARY" "$MAX_UPLOAD_MB" \
-      "$CF_HTTP_PORTS" \
+      "$CF_HTTP_PORTS" "$ENABLE_TLS_LAYER" \
       || die "Failed to render nginx config"
 
   local f

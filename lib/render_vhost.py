@@ -19,6 +19,7 @@ import sys, re
 
 tpl_path, out_path, local_tls, xport, xpath, primary, maxmb = sys.argv[1:8]
 http_ports = sys.argv[8] if len(sys.argv) > 8 else "80"
+enable_tls = (sys.argv[9] if len(sys.argv) > 9 else "1") == "1"
 
 listen_lines = []
 for i, p in enumerate([x.strip() for x in http_ports.split(",") if x.strip()]):
@@ -78,6 +79,10 @@ else:
     root_loc = "    location / { try_files $uri $uri/ /index.php?$query_string; }"
 
 s = open(tpl_path, encoding="utf-8").read()
+if not enable_tls:
+    marker = "# ---------- TLS terminated site"
+    if marker in s:
+        s = s[:s.index(marker)]
 s = (s.replace("__XHTTP_LOC_443__", xhttp_loc.rstrip())
        .replace("__XHTTP_LOC_80__", xhttp_loc80.rstrip())
        .replace("__ROOT_LOC__", root_loc)
@@ -90,4 +95,4 @@ s += """
 # error page
 """
 open(out_path, "w", encoding="utf-8").write(s)
-print("[render] mode=" + ("root-path" if root_mode else "/" + clean) + "  http ports=" + http_ports)
+print("[render] mode=" + ("root-path" if root_mode else "/" + clean) + "  http ports=" + http_ports + "  tls-layer=" + ("on" if enable_tls else "OFF"))
