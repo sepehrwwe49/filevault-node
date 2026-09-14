@@ -25,6 +25,7 @@ import sys, os
 tpl_path, out_path, local_tls, xport, xpath, primary, maxmb = sys.argv[1:8]
 http_ports = sys.argv[8] if len(sys.argv) > 8 else "80"
 enable_tls = (sys.argv[9] if len(sys.argv) > 9 else "1") == "1"
+cert_dir   = sys.argv[10] if len(sys.argv) > 10 else "/etc/letsencrypt/live/" + primary
 
 listen_lines = []
 for i, p in enumerate([x.strip() for x in http_ports.split(",") if x.strip()]):
@@ -123,6 +124,7 @@ s = (s.replace("__XHTTP_LOC__", xhttp_loc)
        .replace("__HTTP_LISTEN__", HTTP_LISTEN)
        .replace("__LOCAL_TLS_PORT__", local_tls)
        .replace("__XHTTP_PORT__", xport)
+       .replace("__CERT_DIR__", cert_dir)
        .replace("__PRIMARY__", primary)
        .replace("__MAX_UPLOAD_MB__", maxmb))
 open(out_path, "w", encoding="utf-8").write(s)

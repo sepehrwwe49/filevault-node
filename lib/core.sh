@@ -108,12 +108,6 @@ render_config() {
     warn "TLS layer disabled (ENABLE_TLS_LAYER=0) - nginx will NOT bind port 443"
   fi
 
-  python3 "$FV_DIR/lib/render_vhost.py" \
-      "$FV_DIR/nginx/conf.d/00-site.conf.template" \
-      "$FV_DIR/nginx/conf.d/00-site.conf" \
-      "$LOCAL_TLS_PORT" "$XRAY_XHTTP_PORT" "$XRAY_XHTTP_PATH" "$PRIMARY" "$MAX_UPLOAD_MB" \
-      "$CF_HTTP_PORTS" "$ENABLE_TLS_LAYER" \
-      || die "Failed to render nginx config"
 
   local f
   for f in robots.txt sitemap.xml; do
@@ -121,17 +115,30 @@ render_config() {
   done
 
   mkdir -p "$FV_DIR/data/uploads" "$FV_DIR/data/meta" "$FV_DIR/nginx/acme" \
-           "$FV_DIR/letsencrypt/live/$PRIMARY"
+           "$FV_DIR/letsencrypt/selfsigned/$PRIMARY"
   chown -R 33:33 "$FV_DIR/data" 2>/dev/null || true
   chmod -R 775 "$FV_DIR/data" 2>/dev/null || true
 
-  if [ ! -f "$FV_DIR/letsencrypt/live/$PRIMARY/fullchain.pem" ]; then
+  # bootstrap cert lives OUTSIDE live/ so certbot never mistakes it for a real one
+  if [ ! -f "$FV_DIR/letsencrypt/selfsigned/$PRIMARY/fullchain.pem" ]; then
     openssl req -x509 -nodes -newkey rsa:2048 -days 3650 \
-      -keyout "$FV_DIR/letsencrypt/live/$PRIMARY/privkey.pem" \
-      -out    "$FV_DIR/letsencrypt/live/$PRIMARY/fullchain.pem" \
+      -keyout "$FV_DIR/letsencrypt/selfsigned/$PRIMARY/privkey.pem" \
+      -out    "$FV_DIR/letsencrypt/selfsigned/$PRIMARY/fullchain.pem" \
       -subj "/CN=$PRIMARY" >/dev/null 2>&1
-    warn "Temporary self-signed certificate created (certbot will replace it)"
+    warn "Bootstrap self-signed certificate created (certbot will issue the real one)"
   fi
+  if [ -f "$FV_DIR/letsencrypt/live/$PRIMARY/fullchain.pem" ]; then
+    CERT_DIR="/etc/letsencrypt/live/$PRIMARY"
+  else
+    CERT_DIR="/etc/letsencrypt/selfsigned/$PRIMARY"
+    warn "No Let's Encrypt certificate yet - nginx will use the bootstrap cert"
+  fi
+  python3 "$FV_DIR/lib/render_vhost.py" \
+      "$FV_DIR/nginx/conf.d/00-site.conf.template" \
+      "$FV_DIR/nginx/conf.d/00-site.conf" \
+      "$LOCAL_TLS_PORT" "$XRAY_XHTTP_PORT" "$XRAY_XHTTP_PATH" "$PRIMARY" "$MAX_UPLOAD_MB" \
+      "$CF_HTTP_PORTS" "$ENABLE_TLS_LAYER" "$CERT_DIR" \
+      || die "Failed to render nginx config"
   ok "Config rendered (primary domain: $PRIMARY)"
 }
 

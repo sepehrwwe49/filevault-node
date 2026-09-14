@@ -10,7 +10,9 @@ PRIMARY=$(echo "$SITE_DOMAINS" | cut -d, -f1)
 ARGS=""
 for d in $(echo "$SITE_DOMAINS" | tr ',' ' '); do ARGS="$ARGS -d $d"; done
 
-if [ ! -f "/etc/letsencrypt/live/$PRIMARY/fullchain.pem" ]; then
+if [ ! -f "/etc/letsencrypt/renewal/$PRIMARY.conf" ]; then
+  # a stale bootstrap cert must not block issuance
+  [ -d "/etc/letsencrypt/live/$PRIMARY" ] && rm -rf "/etc/letsencrypt/live/$PRIMARY"
   echo "[certbot] issuing certificate for: $SITE_DOMAINS"
   certbot certonly --non-interactive --agree-tos --email "$LE_EMAIL" \
     --dns-cloudflare --dns-cloudflare-credentials "$CRED" \
